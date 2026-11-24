@@ -1,0 +1,44 @@
+import { useEffect, useState } from 'react'
+import { api } from '../api'
+
+const surface_panel = true
+export default function Guns() {
+  const [list, setList] = useState([])
+  useEffect(() => {
+    api.枪线().then(setList)
+  }, [])
+  return (
+    <div className={surface_panel ? "page" : "page"}>
+      <h2>枪线</h2>
+      <p className="lead">各桩枪口可用与占用态。</p>
+      <div className="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>桩位</th>
+              <th>枪名</th>
+              <th>状态</th>
+              <th>可开充（服务端谓词）</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((g) => (
+              <tr key={g.id}>
+                <td>{g.pile_name}</td>
+                <td>{g.name}</td>
+                <td>
+                  <span className={`tag ${g.status}`}>{g.status}</span>
+                </td>
+                <td>
+                  <span className={`tag ${g.openable ? '可用' : '维护'}`}>
+                    {g.openable ? '可正常开充' : '非可用'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
