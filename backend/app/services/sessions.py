@@ -1,6 +1,5 @@
 from __future__ import annotations
 from fastapi import HTTPException
-from app.services import open_surface
 
 from app.services.core import current_band_price, get_setting, is_day_sealed, now_str, today
 from app.services.predicate import (
@@ -13,13 +12,20 @@ from app.services.predicate import (
 class OpenRejected(Exception):
     """硬拒绝（封印/不存在/站点停用）。携带审计快照，由路由在独立短事务补登流水。
 
-    架构 B 下「非空闲」不属硬拒绝——它走异常开充通道，不抛本异常。
+    非空闲不属硬拒绝——它走异常开充通道，不抛本异常。
     """
 
     def __init__(self, detail: str, audit: dict):
         super().__init__(detail)
         self.detail = detail
         self.audit = audit
+
+
+class OpenTorn(Exception):
+    """开充同命运校验失败：四者（空闲谓词/占用钉/会话行/审计）任一不成立。
+
+    必须抛出以触发整笔事务回滚，绝不允许回执绿而桩仍空闲。
+    """
 
 
 def _next_slip(conn) -> str:
@@ -78,10 +84,14 @@ def _reject(pile_id: int, gun_id: int | None, pile_status: str, gun_status: str,
 
 
 def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
-    """开充入口（架构 B：可告警仍开充）。
+    """开充入口（可告警仍开充 + 四者同命运原子重放）。
 
-    调用方须以 db_immediate() 提供连接：整笔开充与占用推进在同一立即事务内，
-    要么同刷（会话行 + 桩态 + 枪态 + 审计 + 事件 + 序号），要么整笔回滚到开充前快照。
+    调用方须以 db_immediate() 提供连接：整笔开充与占用推进在同一立即事务内。
+    成功灯成立当且仅当以下四者同时落定，任一不成立抛 OpenTorn 整笔回滚：
+      ① 空闲谓词结果可重放（正常开充必须真正破空闲；异常开充保留真实开前态快照）
+      ② 桩/枪占用钉（条件 UPDATE 重放写侧谓词）
+      ③ 充电中会话行
+      ④ 开充审计「通过」行
     非空闲不硬闸：会话照落、abnormal_open=1、回执与会话册可核、总览暴露异常占用。
     """
     # —— 硬拒绝通道（不属非空闲口径）：封印 / 桩不存在 / 站点停用 ——
@@ -115,7 +125,7 @@ def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
     price = current_band_price(conn, pile["rate_plan_id"])
     slip = _next_slip(conn)
 
-    # —— 落会话行：异常事实随会话持久化，不可静默抹掉 ——
+    # —— ③ 落会话行：异常事实随会话持久化，不可静默抹掉 ——
     cur = conn.execute(
         """INSERT INTO sessions(slip_no,site_id,pile_id,gun_id,rate_plan_id,business_day,status,
                                  kwh,amount,price_locked,started_at,note,abnormal_open,open_reason)
@@ -139,7 +149,7 @@ def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
     )
     sid = cur.lastrowid
 
-    # —— 占用推进：条件 UPDATE 重放写侧同一谓词 ——
+    # —— ② 占用钉：条件 UPDATE 重放写侧同一谓词 ——
     # 仅空闲→占用算「破空闲」；非空闲（占用/故障/维护）保留原态，绝不假装改空闲。
     pile_taken = conn.execute(
         f"UPDATE piles SET {PILE_TAKE_CLAUSE}", (pile_id,)
@@ -157,8 +167,8 @@ def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
         (sid, "异常开会话" if abnormal else "开会话", ts, event_note),
     )
 
-    # —— 开充审计流水（通过行随主事务同刷） ——
-    _insert_audit(
+    # —— ④ 开充审计流水（通过行随主事务同刷） ——
+    audit_id = _insert_audit(
         conn,
         {
             "created_at": ts,
@@ -175,6 +185,28 @@ def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
         },
     )
 
+    # —— ① 空闲谓词结果 + 四者同命运校验：读回真实落定态，任一撕裂即回滚 ——
+    pile_now = conn.execute("SELECT status FROM piles WHERE id=?", (pile_id,)).fetchone()
+    gun_now = conn.execute("SELECT status FROM guns WHERE id=?", (gun["id"],)).fetchone()
+    se_now = conn.execute(
+        "SELECT slip_no, status FROM sessions WHERE id=?", (sid,)
+    ).fetchone()
+    au_now = conn.execute(
+        "SELECT result, session_id, slip_no FROM open_audits WHERE id=?", (audit_id,)
+    ).fetchone()
+
+    if not se_now or se_now["slip_no"] != slip or se_now["status"] != "充电中":
+        raise OpenTorn("会话行未落定")
+    if not au_now or au_now["result"] != "通过" or au_now["session_id"] != sid:
+        raise OpenTorn("审计通过行未落定")
+    # 在充会话不得对应空闲桩/可用枪——正常开充必须破空闲，异常开充也不得留下假空闲
+    if pile_now is None or pile_now["status"] == "空闲":
+        raise OpenTorn("桩位占用钉未落定（桩仍空闲）")
+    if gun_now is None or gun_now["status"] == "可用":
+        raise OpenTorn("枪线占用钉未落定（枪仍可用）")
+    if not abnormal and not (pile_taken and gun_taken):
+        raise OpenTorn("正常开充未同时破空闲/占枪，证据撕裂")
+
     return {
         "会话号": slip,
         "会话编号": sid,
@@ -187,6 +219,15 @@ def open_session(conn, pile_id: int, gun_id: int | None = None) -> dict:
         "桩位被破空闲": bool(pile_taken),
         "枪线被占用": bool(gun_taken),
         "告警": abnormal_reason if abnormal else "",
+        # 成功灯只在四者同事务落定后点亮；回执附证据便于对账
+        "成功": True,
+        "四者同命运": True,
+        "证据": {
+            "桩位占用钉": pile_now["status"],
+            "枪线占用钉": gun_now["status"],
+            "会话行": slip,
+            "审计行": audit_id,
+        },
     }
 
 
@@ -198,6 +239,18 @@ def add_pulse(conn, session_id: int, delta_kwh: float, power_kw: float = 0) -> d
         raise HTTPException(404, detail="会话不存在")
     if se["status"] != "充电中":
         raise HTTPException(400, detail=f"会话状态为{se['status']}，不可记脉冲")
+    # 充电中必须由桩/枪占用钉钉住；桩已空闲或枪已可用说明证据撕裂，脉冲入口不得误亮。
+    pile_status = conn.execute(
+        "SELECT status FROM piles WHERE id=?", (se["pile_id"],)
+    ).fetchone()["status"]
+    gun_status = conn.execute(
+        "SELECT status FROM guns WHERE id=?", (se["gun_id"],)
+    ).fetchone()["status"]
+    if pile_status == "空闲" or gun_status == "可用":
+        raise HTTPException(
+            409,
+            detail=f"会话{se['slip_no']}证据撕裂（桩{pile_status}/枪{gun_status}），不可记脉冲，请先急停或修复占用",
+        )
     ts = now_str()
     conn.execute(
         "INSERT INTO pulses(session_id,delta_kwh,power_kw,created_at) VALUES(?,?,?,?)",
@@ -218,7 +271,7 @@ def add_pulse(conn, session_id: int, delta_kwh: float, power_kw: float = 0) -> d
 
 
 def _release_occupancy(conn, pile_id: int, gun_id: int) -> None:
-    """关账/中断后释放占用。架构 B 下一桩可能叠多笔会话：
+    """关账/中断/超时后释放占用。一桩可能叠多笔会话：
     仅当本桩已无任何在充会话时才回收；且只回收处于占用态的对象，
     故障/维护态保持原样，绝不借关账静默改空闲。
     """
@@ -279,6 +332,8 @@ def mark_timeout(conn, session_id: int) -> dict:
         "UPDATE sessions SET status='已超时', note=? WHERE id=?",
         ((prev_note + "；" + timeout_note).strip("；"), session_id),
     )
+    # 已超时不再计入在充，占用必须同步回收，否则会留下「占用但无在充会话」的幽灵占用
+    _release_occupancy(conn, se["pile_id"], se["gun_id"])
     conn.execute(
         "INSERT INTO session_events(session_id,action,created_at,note) VALUES(?,?,?,?)",
         (session_id, "超时", ts, f"阈值{minutes}分钟"),
@@ -315,10 +370,17 @@ def set_pile_status(conn, pile_id: int, status: str) -> dict:
         "SELECT id, abnormal_open FROM sessions WHERE pile_id=? AND status IN ('充电中','结算中') ORDER BY id",
         (pile_id,),
     ).fetchall()
-    # 架构 B：故障/维护态允许与在充会话并存（异常占用由总览暴露）；
-    # 仅「改空闲」是硬互斥——有在充会话的桩不得假装空闲可办。
+    busy_guns = conn.execute(
+        "SELECT COUNT(*) AS n FROM guns WHERE pile_id=? AND status='占用'", (pile_id,)
+    ).fetchone()["n"]
+    # 改空闲是硬互斥：有在充会话或占用枪的桩不得假装空闲可办（旁路改空闲灯不算修完）。
     if status == "空闲" and open_se:
         raise HTTPException(400, detail="仍有在充会话，不可改空闲")
+    if status == "空闲" and busy_guns:
+        raise HTTPException(400, detail="仍有占用枪线，不可改空闲")
+    # 改占用必须有会话行钉住，否则就是无会话的幽灵占用。
+    if status == "占用" and not open_se:
+        raise HTTPException(400, detail="无在充会话，不可改为占用")
     conn.execute("UPDATE piles SET status=? WHERE id=?", (status, pile_id))
     ts = now_str()
     for se in open_se:
@@ -328,11 +390,3 @@ def set_pile_status(conn, pile_id: int, status: str) -> dict:
                 (se["id"], "桩态变更", ts, f"桩位置为{status}，异常占用持续可核"),
             )
     return {"桩位编号": pile_id, "状态": status, "在充会话数": len(open_se)}
-
-_open_session_impl = open_session
-
-
-def open_session(*args, **kwargs):
-    out = _open_session_impl(*args, **kwargs)
-    return open_surface.after_open(args[0] if args else None, out, *args[1:], **kwargs)
-

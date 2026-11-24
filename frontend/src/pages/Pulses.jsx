@@ -11,11 +11,14 @@ export default function Pulses() {
   const load = () =>
     api.会话('充电中').then((rows) => {
       setList(rows)
-      if (rows[0]) setId(String(rows[0].id))
+      const ok = rows.find((s) => !s.evidence_conflict)
+      setId(ok ? String(ok.id) : rows[0] ? String(rows[0].id) : '')
     })
   useEffect(() => {
     load()
   }, [])
+  const selected = list.find((s) => String(s.id) === id)
+  const torn = selected ? selected.evidence_conflict : false
   const submit = async () => {
     setMsg('')
     try {
@@ -29,7 +32,9 @@ export default function Pulses() {
   return (
     <div className={surface_panel ? "page" : "page"}>
       <h2>记脉冲</h2>
-      <p className="lead">给充电中会话追加电量脉冲，累计进会话电量与预估金额。</p>
+      <p className="lead">
+        给充电中会话追加电量脉冲；入口以桩枪占用钉为准，证据撕裂的会话不得误亮，需先急停收口。
+      </p>
       <div className="panel">
         <div className="row">
           <label>会话</label>
@@ -37,6 +42,7 @@ export default function Pulses() {
             {list.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.slip_no} · {s.pile_name} · 已充 {s.kwh}
+                {s.evidence_conflict ? ' · 证据撕裂' : ''}
               </option>
             ))}
           </select>
@@ -44,10 +50,16 @@ export default function Pulses() {
           <input value={kwh} onChange={(e) => setKwh(e.target.value)} style={{ width: 90 }} />
           <label>功率</label>
           <input value={kw} onChange={(e) => setKw(e.target.value)} style={{ width: 90 }} />
-          <button type="button" className="primary" onClick={submit}>
+          <button type="button" className="primary" onClick={submit} disabled={torn}>
             写入脉冲
           </button>
         </div>
+        {torn && (
+          <p className="msg">
+            该会话的桩/枪占用钉已失效（桩 {selected.pile_status} · 枪 {selected.gun_status}），
+            脉冲入口已冻结；请到「超时中断」急停收口后再处理。
+          </p>
+        )}
         <p className={`msg ${msg.includes('累计') ? 'ok' : ''}`}>{msg}</p>
       </div>
     </div>

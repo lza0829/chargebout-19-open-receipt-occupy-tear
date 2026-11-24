@@ -1,7 +1,7 @@
 from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from app.db import db
+from app.db import db, db_immediate
 from app.services import core
 from app.services.sessions import set_pile_status
 
@@ -42,7 +42,8 @@ def create_pile(body: PileIn):
 
 @router.post("/桩位/{pile_id}/状态")
 def change_status(pile_id: int, body: PileStatusIn):
-    with db() as conn:
+    # 桩态变更与占用钉互斥在同一立即事务内校验，避免读后写竞态留下撕裂。
+    with db_immediate() as conn:
         return set_pile_status(conn, pile_id, body.状态)
 
 def _surface_router_piles() -> dict:

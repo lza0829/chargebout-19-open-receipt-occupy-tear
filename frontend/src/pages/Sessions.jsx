@@ -20,6 +20,7 @@ export default function Sessions() {
               <th>站点桩位</th>
               <th>状态</th>
               <th>开充</th>
+              <th>在充证据</th>
               <th>电量</th>
               <th>金额</th>
               <th>营业日</th>
@@ -41,6 +42,19 @@ export default function Sessions() {
                     <span className="tag 故障" title={s.open_reason}>异常开充</span>
                   ) : (
                     <span className="tag 空闲">正常</span>
+                  )}
+                </td>
+                <td>
+                  {s.status === '充电中' || s.status === '结算中' ? (
+                    s.evidence_conflict ? (
+                      <span className="tag 故障" title={`桩 ${s.pile_status} · 枪 ${s.gun_status}`}>
+                        占用钉/会话撕裂
+                      </span>
+                    ) : (
+                      <span className="tag 空闲">桩枪钉住</span>
+                    )
+                  ) : (
+                    <span className="tag">—</span>
                   )}
                 </td>
                 <td>{s.kwh}</td>

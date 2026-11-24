@@ -35,6 +35,7 @@ export default function Settle() {
               <th>状态</th>
               <th>电量</th>
               <th>预估金额</th>
+              <th>占用证据</th>
               <th />
             </tr>
           </thead>
@@ -50,6 +51,19 @@ export default function Settle() {
                 </td>
                 <td>{s.kwh}</td>
                 <td>{s.amount}</td>
+                <td>
+                  {s.status === '充电中' || s.status === '结算中' ? (
+                    s.evidence_conflict ? (
+                      <span className="tag 故障" title={`桩 ${s.pile_status} · 枪 ${s.gun_status}`}>
+                        桩枪钉失效
+                      </span>
+                    ) : (
+                      <span className="tag 空闲">桩枪钉住</span>
+                    )
+                  ) : (
+                    <span className="tag">—</span>
+                  )}
+                </td>
                 <td>
                   <button type="button" className="primary" onClick={() => go(s.id)}>
                     结算关账

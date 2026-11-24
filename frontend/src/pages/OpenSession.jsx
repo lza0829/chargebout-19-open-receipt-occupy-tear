@@ -51,6 +51,11 @@ export default function OpenSession() {
           : `已开 ${r.会话号}，锁定电价 ${r.锁定电价}（开前桩态 ${r.桩位开前态} → 占用）`,
       )
       await loadPiles()
+      // 成功灯必须与桩枪占用钉、会话行、审计同命运；回执缺证据就不得显示已开充。
+      if (!r.成功 || !r.四者同命运) {
+        setWarn(true)
+        setMsg(`回执缺少同刷证据，未点亮成功灯（${r.会话号 || '无单号'}）`)
+      }
     } catch (e) {
       setWarn(true)
       setMsg(e.message)
@@ -104,6 +109,15 @@ export default function OpenSession() {
               <tr><th>枪线开前态</th><td>{receipt.枪线开前态}</td></tr>
               <tr><th>桩位被破空闲</th><td>{receipt.桩位被破空闲 ? '是' : '否'}</td></tr>
               <tr><th>枪线被占用</th><td>{receipt.枪线被占用 ? '是' : '否'}</td></tr>
+              <tr><th>四者同命运</th><td>{receipt.四者同命运 ? '是' : '否'}</td></tr>
+              <tr>
+                <th>占用钉/会话/审计</th>
+                <td>
+                  {receipt.证据
+                    ? `桩 ${receipt.证据.桩位占用钉} · 枪 ${receipt.证据.枪线占用钉} · 会话 ${receipt.证据.会话行} · 审计 #${receipt.证据.审计行}`
+                    : '—'}
+                </td>
+              </tr>
             </tbody>
           </table>
         )}

@@ -25,6 +25,7 @@ export default function OpenAudits() {
               <th>开前桩态</th>
               <th>开前枪态</th>
               <th>会话号</th>
+              <th>可重放</th>
               <th>原因/快照说明</th>
             </tr>
           </thead>
@@ -42,6 +43,13 @@ export default function OpenAudits() {
                 <td>{a.snapshot_pile_status || '—'}</td>
                 <td>{a.snapshot_gun_status || '—'}</td>
                 <td>{a.slip_no || '—'}</td>
+                <td>
+                  {a.replayable ? (
+                    <span className="tag 空闲">可重放</span>
+                  ) : (
+                    <span className="tag 故障">审计绿但会话缺</span>
+                  )}
+                </td>
                 <td>{a.reason || '—'}</td>
               </tr>
             ))}
